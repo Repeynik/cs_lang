@@ -1,110 +1,235 @@
 
 
 import logging
-from cs_lang import Neo4jRepository  
+from cs_lang import EmbeddingService, EmbeddingSearchService, OntologyRepository, Neo4jRepository, OntologyEmbeddingPipeline
+from huggingface_hub import snapshot_download
 
 
 logging.basicConfig(level=logging.INFO)
 
 
-URI = "neo4j://127.0.0.1:7687"   
-USER = "neo4j"
-PASSWORD = "123456789"               
 
-def main():
-    
-    with Neo4jRepository(database_uri=URI, user=USER, password=PASSWORD) as repo:
-        
-        print("\n--- Создание узлов ---")
-        node1 = repo.create_node({"label": "Person", "description": "Алиса", "age": 30})
-        node2 = repo.create_node({"label": "Person", "description": "Боб", "age": 25})
-        node3 = repo.create_node({"label": "Company", "description": "Технологии будущего", "industry": "IT"})
-        print(f"Создан узел: {node1}")
-        print(f"Создан узел: {node2}")
-        print(f"Создан узел: {node3}")
+def example_cosine_similarity():
+    service = EmbeddingService(
+        model_name="./paraphrase-multilingual-mpnet-base-v2"
+    )
+    text1 = "Кошка сидит на подоконнике"
+    text2 = "На окне сидит кот"
+    text3 = "Сервер не отвечает по SSH"
 
-        
-        print("\n--- Создание связей ---")
-        arc1 = repo.create_arc(node1.uri, node2.uri, rel_type="KNOWS", since=2020)
-        arc2 = repo.create_arc(node1.uri, node3.uri, rel_type="WORKS_FOR", position="Инженер")
-        print(f"Создана связь: {arc1}")
-        print(f"Создана связь: {arc2}")
+    embeddings = service.get_embeddings([text1, text2, text3])
 
-        
-        print("\n--- Все узлы и связи ---")
-        all_nodes, all_arcs = repo.get_all_nodes_and_arcs()
-        print(f"Всего узлов: {len(all_nodes)}")
-        for n in all_nodes:
-            print(f"  {n}")
-        print(f"Всего связей: {len(all_arcs)}")
-        for r in all_arcs:
-            print(f"  {r}")
+    sim_1_2 = service.cos_compare(embeddings[0], embeddings[1])
+    sim_1_3 = service.cos_compare(embeddings[0], embeddings[2])
+    sim_2_3 = service.cos_compare(embeddings[1], embeddings[2])
 
-        
-        print("\n--- Узлы с меткой 'Person' ---")
-        persons = repo.get_nodes_by_labels(["Person"])
-        for p in persons:
-            print(f"  {p}")
+    print("Пример косинусного сходства:")
+    print(f"text1: {text1}")
+    print(f"text2: {text2}")
+    print(f"text3: {text3}")
+    print()
+    print(f"similarity(text1, text2) = {sim_1_2:.4f}")
+    print(f"similarity(text1, text3) = {sim_1_3:.4f}")
+    print(f"similarity(text2, text3) = {sim_2_3:.4f}")
+    print()
 
-        
-        print("\n--- Получение узла по uri ---")
-        try:
-            found_node = repo.get_node_by_uri(node1.uri)
-            print(f"Найден узел: {found_node}")
-        except ValueError:
-            print("Узел не найден")
+    if sim_1_2 > sim_1_3:
+        print("text1 и text2 семантически ближе, чем text1 и text3")
+    else:
+        print("text1 и text3 семантически ближе, чем text1 и text2")
 
-        
-        print("\n--- Обновление узла ---")
-        updated = repo.update_node(node1.uri, {"age": 31, "city": "Москва"})
-        print(f"Обновлённый узел: {updated}")
-        
-        print("\n--- Удаление ---")
-        
-        repo.delete_arc_by_id(arc1.element_id)
-        repo.delete_arc_by_id(arc2.element_id)
-        print("Связи удалены")
-        
-        repo.delete_node_by_uri(node1.uri)
-        repo.delete_node_by_uri(node2.uri)
-        repo.delete_node_by_uri(node3.uri)
-        print("Узлы удалены")
 
-        
-        nodes_after, arcs_after = repo.get_all_nodes_and_arcs()
-        print(f"После удаления осталось узлов: {len(nodes_after)}, связей: {len(arcs_after)}")
-        print(f"После удаления осталось узлов: {len(nodes_after)}, связей: {len(arcs_after)}")
+def example_chunk_embedding_and_search():
+    service = EmbeddingService(
+        model_name="./paraphrase-multilingual-mpnet-base-v2"
+    )
+    search_service = EmbeddingSearchService(service)
+
+    texts = [
+        {
+            "source_id": "class_1",
+            "source_type": "Class",
+            "text": "Класс: Сервер. Описание: Сервер предоставляет вычислительные ресурсы и сетевые сервисы.",
+        },
+        {
+            "source_id": "class_2",
+            "source_type": "Class",
+            "text": "Класс: База данных. Описание: База данных хранит структурированную информацию и поддерживает запросы.",
+        },
+        {
+            "source_id": "object_1",
+            "source_type": "Object",
+            "text": "Объект: web-01. Описание: Веб сервер production. Атрибуты: ip: 10.0.0.1; role: frontend",
+        },
+    ]
+
+    chunks = service.get_chunks(
+        texts=texts,
+        chunk_size=120,
+        overlap=20,
+        min_chunk_length=20,
+    )
+
+    embedded_chunks = service.embed_chunks(chunks)
+
+    query = "сервер для веб приложения"
+    results = search_service.find_most_similar(
+        query=query,
+        stored_chunks=embedded_chunks,
+        top_k=3,
+    )
+
+    print("Пример поиска похожих чанков:")
+    print(f"query: {query}")
+    print()
+
+    for i, item in enumerate(results, start=1):
+        score = item["score"]
+        chunk = item["chunk"]["chunk"]
+        print(f"{i}. score={score:.4f}")
+        print(f"   source_id={chunk.source_id}")
+        print(f"   source_type={chunk.source_type}")
+        print(f"   text={chunk.text}")
+        print()
+
+def seed_demo_ontology():
     with Neo4jRepository(
-        database_uri="bolt://localhost:7687",
+        database_uri="bolt://127.0.0.1:7687",
         user="neo4j",
         password="123456789",
     ) as repo:
         ontology_repo = OntologyRepository(repo=repo)
-        embedding_service = EmbeddingService()
+
+        server_class = ontology_repo.create_class(
+            name="Сервер",
+            description="Узел, предоставляющий вычислительные и сетевые сервисы",
+        )
+
+        db_class = ontology_repo.create_class(
+            name="База данных",
+            description="Система хранения структурированных данных",
+        )
+
+        ontology_repo.add_class_attribue(
+            class_uri=server_class.uri,
+            attr_name="ip",
+            datatype="string",
+            description="IP адрес сервера",
+        )
+
+        ontology_repo.add_class_attribue(
+            class_uri=server_class.uri,
+            attr_name="role",
+            datatype="string",
+            description="Роль сервера",
+        )
+
+        ontology_repo.add_class_object_attribute(
+            class_uri=server_class.uri,
+            attr_name="uses_database",
+            range_class_uri=db_class.uri,
+            description="Сервер использует базу данных",
+        )
+
+        web_obj = ontology_repo.create_object(
+            class_uri=server_class.uri,
+            obj_params={
+                "description": "Production web server",
+                "title": "web-01",
+            },
+            data={
+                "ip": "10.0.0.1",
+                "role": "frontend",
+            },
+        )
+
+        db_obj = ontology_repo.create_object(
+            class_uri=db_class.uri,
+            obj_params={
+                "description": "Primary database",
+                "title": "db-01",
+            },
+            data={},
+        )
+
+        ontology_repo.update_object(
+            object_uri=web_obj.uri,
+            data={
+                "uses_database": db_obj.uri,
+            },
+        )
+
+        print("Тестовая онтология создана")
+        
+def example_pipeline_with_neo4j():
+    with Neo4jRepository(
+        database_uri="neo4j://127.0.0.1:7687",
+        user="neo4j",
+        password="123456789",
+    ) as repo:
+        ontology_repo = OntologyRepository(repo=repo)
+        embedding_service = EmbeddingService(
+        model_name="./paraphrase-multilingual-mpnet-base-v2"
+    )
         pipeline = OntologyEmbeddingPipeline(
             ontology_repo=ontology_repo,
             embedding_service=embedding_service,
         )
 
-        embedded_chunks = pipeline.save_embeddings_to_neo4j(
-            chunk_size=500,
-            overlap=100,
+        embedded_chunks = pipeline.build_embeddings_for_ontology(
+            chunk_size=300,
+            overlap=50,
         )
 
-        print(f"Saved {len(embedded_chunks)} chunks with embeddings")
+        print("Количество подготовленных чанков:", len(embedded_chunks))
+
+        if len(embedded_chunks) >= 2:
+            emb1 = embedded_chunks[0]["embedding"]
+            emb2 = embedded_chunks[1]["embedding"]
+            score = embedding_service.cos_compare(emb1, emb2)
+            print("Cosine similarity между первыми двумя чанками:", round(score, 4))
+
+        pipeline.save_embeddings_to_neo4j(
+            chunk_size=300,
+            overlap=50,
+        )
 
         stored_chunks = ontology_repo.get_all_text_chunks()
-        search_service = EmbeddingSearchService(embedding_service)
 
-        results = search_service.find_most_similar(
-            query="поиск похожих описаний классов",
-            stored_chunks=stored_chunks,
-            top_k=5,
-        )
+        query = "класс для хранения данных"
+        query_embedding = embedding_service.get_embeddings([query])[0]
 
-        for item in results:
-            print(item["score"], item["chunk"].get("text", ""))
+        scored = []
+        for chunk_data in stored_chunks:
+            emb = chunk_data.get("embedding")
+            if not emb:
+                continue
+            score = embedding_service.cos_compare(query_embedding, emb)
+            scored.append({
+                "score": score,
+                "text": chunk_data.get("text", ""),
+                "source_id": chunk_data.get("source_id", ""),
+                "source_type": chunk_data.get("source_type", ""),
+            })
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+
+        print("Результаты поиска по уже сохраненным embedding в Neo4j:")
+        for item in scored[:5]:
+            print(f"score={item['score']:.4f} | {item['source_type']} | {item['source_id']}")
+            print(item["text"])
+            print()
 
 
 if __name__ == "__main__":
-    main()
+    snapshot_download(
+        repo_id="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+        local_dir="./paraphrase-multilingual-mpnet-base-v2",
+        local_dir_use_symlinks=False,
+    )
+    example_cosine_similarity()
+    print("=" * 80)
+    example_chunk_embedding_and_search()
+    print("=" * 80)
+    # seed_demo_ontology()
+    example_pipeline_with_neo4j()

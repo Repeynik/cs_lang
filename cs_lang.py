@@ -950,7 +950,6 @@ class EmbeddingService:
         return result
 
     def _normalize_text(self, text: str) -> str:
-        text = text.replace("\xa0", " ")
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
@@ -982,7 +981,7 @@ class EmbeddingService:
         window_start = max(start, raw_end - 120)
         candidate = text[window_start:raw_end]
 
-        for pattern in ["\n\n", ". ", "! ", "? ", "; ", ", ", " "]:
+        for pattern in ["\n\n", ". ", "! ", "? ", "\t", "\n"]:
             pos = candidate.rfind(pattern)
             if pos != -1:
                 return window_start + pos + len(pattern)

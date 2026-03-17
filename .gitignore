@@ -1,0 +1,5 @@
+/__pycache
+/.venv
+__pycache__/
+.venv/
+paraphrase-multilingual-mpnet-base-v2
