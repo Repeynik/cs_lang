@@ -1,14 +1,16 @@
-
-import argparse
-import json
 import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 from json_ontology_loader import load_ontology_from_json, build_ontology_texts
+from text_json_loader import (
+    AnnotationCorpus,
+    find_annotation_files,
+    load_text_annotations,
+)
 from embedding_service import EmbeddingService
-from search_service import SearchService
 from llm_service import BaseLLM, StubLLM, TransformersLLM, DeepseekApiLLM
 from rag_pipeline import RAGPipeline
 
@@ -19,135 +21,129 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+GRAPH_JSON = "graph.json"
+ANNOTATION_DIR = "."
+EMBEDDING_MODEL = "./paraphrase-multilingual-mpnet-base-v2"
+
+TOP_N = 5
+TOP_M = 5
+K_SENTENCES = 2
+L_FRAGMENTS = 3
 
 
 def download_model(
     repo_id: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
-    local_dir: str = "./paraphrase-multilingual-mpnet-base-v2",
-):
+    local_dir: str = EMBEDDING_MODEL,
+) -> None:
     from huggingface_hub import snapshot_download
+    logger.info("Скачивание модели %s ...", repo_id)
     snapshot_download(
         repo_id=repo_id,
         local_dir=local_dir,
         local_dir_use_symlinks=False,
     )
-    logger.info("Модель скачана в %s", local_dir)
+    logger.info("Модель сохранена в %s", local_dir)
 
 
-def create_llm(args: argparse.Namespace) -> BaseLLM:
-    if args.llm == "stub":
-        logger.info("Используется StubLLM (заглушка).")
+def create_llm(backend: str) -> BaseLLM:
+    if backend == "stub":
+        logger.info("LLM: StubLLM (заглушка).")
         return StubLLM()
 
-    elif args.llm == "transformers":
-        model = args.transformers_model or "meta-llama/Llama-3.1-8B-Instruct"
-        logger.info("Используется TransformersLLM: %s", model)
+    if backend == "transformers":
+        model = os.getenv("TRANSFORMERS_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+        logger.info("LLM: TransformersLLM — %s", model)
         return TransformersLLM(model_name=model)
 
-    elif args.llm == "deepseek":
-        api_key = args.api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+    if backend == "deepseek":
+        api_key = os.getenv("TIMEWEB_AI_TOKEN", "")
         if not api_key:
-            logger.error("Не задан API-ключ. Используйте --api-key или DEEPSEEK_API_KEY.")
-            sys.exit(1)
-        base_url = args.base_url or "https://api.deepseek.com"
-        model = args.api_model or "deepseek-chat"
-        logger.info("Используется DeepseekApiLLM: %s (%s)", model, base_url)
+            raise RuntimeError("Не задан TIMEWEB_AI_TOKEN")
+        base_url = (
+            ""
+        )
+        model = "gpt-4.1"
+        logger.info("LLM: Timeweb Agent API — %s (%s)", model, base_url)
         return DeepseekApiLLM(api_key=api_key, base_url=base_url, model=model)
 
-    else:
-        raise ValueError(f"Неизвестный LLM бэкенд: {args.llm}")
+    raise ValueError(f"Неизвестный LLM бэкенд: '{backend}'.")
 
 
-
-def main():
-    parser = argparse.ArgumentParser(description="RAG по онтологии")
-    parser.add_argument(
-        "--ontology", "-o",
-        default="graph.json",
-        help="Путь к JSON-файлу онтологии (по умолчанию: graph.json)",
-    )
-    parser.add_argument(
-        "--llm",
-        choices=["stub", "transformers", "deepseek"],
-        default="stub",
-        help="Бэкенд LLM (по умолчанию: stub — заглушка)",
-    )
-    parser.add_argument(
-        "--embedding-model",
-        default="./paraphrase-multilingual-mpnet-base-v2",
-        help="Путь/имя модели для эмбеддингов",
-    )
-    parser.add_argument("--transformers-model", default=None, help="Модель для TransformersLLM")
-    parser.add_argument("--api-key", default=None, help="API-ключ (для deepseek)")
-    parser.add_argument("--base-url", default=None, help="Base URL для API")
-    parser.add_argument("--api-model", default=None, help="Имя модели для API")
-    parser.add_argument("--download-model", action="store_true", help="Скачать модель эмбеддингов")
-    parser.add_argument("--top-n", type=int, default=5, help="Кол-во чанков на фазе 2 (N)")
-    parser.add_argument("--top-m", type=int, default=5, help="Кол-во чанков на фазе 3 (M)")
-    parser.add_argument("--chunk-size", type=int, default=300, help="Размер чанка (символы)")
-    parser.add_argument("--overlap", type=int, default=50, help="Перекрытие чанков")
-
-    args = parser.parse_args()
-
-    if args.download_model:
-        download_model()
-
-    ontology_path = Path(args.ontology)
+def load_data() -> Tuple[List[Dict[str, Any]], AnnotationCorpus]:
+    ontology_path = Path(GRAPH_JSON)
     if not ontology_path.exists():
         logger.error("Файл онтологии не найден: %s", ontology_path)
         sys.exit(1)
 
-    logger.info("=" * 60)
-    logger.info("ФАЗА 1: Подготовка данных")
-    logger.info("=" * 60)
-
+    logger.info("Загрузка онтологии из %s ...", ontology_path)
     graph = load_ontology_from_json(ontology_path)
     logger.info(
-        "Онтология загружена: %d узлов, %d свойств, %d связей",
+        "Онтология: %d узлов, %d свойств, %d связей",
         len(graph.nodes), len(graph.properties), len(graph.arcs),
     )
 
+    node_names = {n.uri: n.name_ru for n in graph.nodes}
     ontology_texts = build_ontology_texts(graph)
-    logger.info("Сгенерировано %d текстовых фрагментов.", len(ontology_texts))
+    for t in ontology_texts:
+        t["name_ru"] = node_names.get(t.get("source_id", ""), "")
+    logger.info("Текстов сущностей онтологии: %d", len(ontology_texts))
 
-    for t in ontology_texts[:3]:
-        logger.info("  [%s] %s", t["source_type"], t["text"][:120] + "...")
+    ann_files = find_annotation_files(ANNOTATION_DIR)
+    logger.info("Найдено файлов аннотаций: %d", len(ann_files))
 
-    embedding_service = EmbeddingService(model_name=args.embedding_model)
-    search_service = SearchService(embedding_service)
-    llm = create_llm(args)
+    if ann_files:
+        corpus = load_text_annotations(ann_files)
+    else:
+        logger.warning("Файлы аннотаций не найдены — фрагменты доступны не будут.")
+        corpus = AnnotationCorpus()
 
-    rag = RAGPipeline(
-        embedding_service=embedding_service,
-        search_service=search_service,
-        llm=llm,
-        top_n=args.top_n,
-        top_m=args.top_m,
+    logger.info(
+        "Корпус: %d документов, %d сущностей с упоминаниями.",
+        len(corpus.documents), len(corpus.occurrences),
     )
 
-    num_chunks = rag.index_texts(
-        ontology_texts,
-        chunk_size=args.chunk_size,
-        overlap=args.overlap,
-    )
-    logger.info("Проиндексировано %d чанков. Готово к вопросам.", num_chunks)
+    return ontology_texts, corpus
 
-    logger.info("=" * 60)
-    logger.info("ФАЗЫ 2-3: Вопрос-Ответ")
-    logger.info("=" * 60)
 
-    demo_questions = [
-        "Какие типы планет существуют?",
-        "Что такое экзопланета?",
-        "Какие телескопы используются для наблюдений?",
-    ]
+def print_result(result: Dict[str, Any]) -> None:
+    print()
+    print("─" * 70)
+    print(f"Вопрос: {result['question']}")
 
-    print("\n" + "=" * 60)
-    print("RAG-система готова. Введите вопрос (или 'выход' для завершения).")
-    print("Примеры вопросов:")
+    print("\n[Фаза 2] Промежуточный ответ:")
+    print(result["intermediate_answer"])
+
+    print("\n[Фаза 2] Сущности N:")
+    for e in result["phase2_entities"]:
+        print(f"  score={e['score']:.4f} | {e['name']}")
+
+    print("\n[Фаза 3] Сущности M (по промежуточному ответу):")
+    for e in result["phase3_entities"]:
+        print(f"  score={e['score']:.4f} | {e['name']}")
+
+    print("\n[Фаза 3] Объединённые сущности (N+M):")
+    for e in result["combined_entities"]:
+        print(f"  score={e['score']:.4f} | {e['name']}")
+
+    print("\n[Фаза 3] Отобранные фрагменты:")
+    for f in result["fragments"]:
+        snippet = f["text"][:120].replace("\n", " ")
+        print(f"  [{f['entity']}] score={f['score']:.4f} | {snippet}...")
+
+    print("\n[Финал] Ответ:")
+    print(result["final_answer"])
+
+    print("─" * 70)
+
+
+def run_interactive(rag: RAGPipeline, demo_questions: List[str]) -> None:
+    print("\n" + "=" * 70)
+    print("RAG-система готова.")
+    print("Введите вопрос или номер демо-вопроса (выход — 'q' / Ctrl+C).")
+    print()
     for i, q in enumerate(demo_questions, 1):
         print(f"  {i}. {q}")
-    print("=" * 60)
+    print("=" * 70)
 
     while True:
         try:
@@ -155,29 +151,57 @@ def main():
         except (EOFError, KeyboardInterrupt):
             break
 
-        if not question or question.lower() in ("выход", "exit", "quit"):
+        if not question or question.lower() in ("q", "quit", "выход", "exit"):
             break
 
         if question.isdigit() and 1 <= int(question) <= len(demo_questions):
             question = demo_questions[int(question) - 1]
             print(f"→ {question}")
 
-        result = rag.ask(question)
-
-        print("\n--- Промежуточный ответ (Фаза 2) ---")
-        print(result["intermediate_answer"])
-        print("\n--- Финальный ответ (Фаза 3) ---")
-        print(result["final_answer"])
-
-        print("\n--- Использованные чанки (Фаза 2, N) ---")
-        for c in result["phase2_chunks"]:
-            print(f"  score={c['score']:.4f} | {c['text'][:80]}...")
-
-        print("\n--- Объединённые чанки (Фаза 3, N+M) ---")
-        for c in result["phase3_chunks"]:
-            print(f"  score={c['score']:.4f} | {c['text'][:80]}...")
+        try:
+            result = rag.ask(question)
+            print_result(result)
+        except Exception as exc:
+            logger.error("Ошибка при обработке вопроса: %s", exc)
 
     print("\nЗавершение работы.")
+
+
+def main() -> None:
+    print("=" * 70)
+    logger.info("Запуск RAG-системы по онтологии")
+    print("=" * 70)
+
+    logger.info("ФАЗА 1: Подготовка данных")
+    ontology_texts, corpus = load_data()
+
+    embedding_service = EmbeddingService(model_name=EMBEDDING_MODEL)
+    llm = create_llm("deepseek")
+
+    rag = RAGPipeline(
+        embedding_service=embedding_service,
+        llm=llm,
+        annotation_corpus=corpus,
+        top_n=TOP_N,
+        top_m=TOP_M,
+        sentence_window_k=K_SENTENCES,
+        fragments_per_entity_l=L_FRAGMENTS,
+    )
+
+    n_indexed = rag.index_ontology_entities(ontology_texts)
+    logger.info("Проиндексировано сущностей онтологии: %d.", n_indexed)
+
+    logger.info("ФАЗЫ 2-3: Вопрос-Ответ")
+
+    demo_questions = [
+        "Какие типы планет существуют?",
+        "Что такое экзопланета?",
+        "Какие телескопы используются для наблюдений?",
+        "Что такое Бетельгейзе и к какому типу звёзд она относится?",
+        "Чем нейтронная звезда отличается от белого карлика?",
+    ]
+
+    run_interactive(rag, demo_questions)
 
 
 if __name__ == "__main__":

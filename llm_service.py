@@ -47,18 +47,20 @@ class TransformersLLM(BaseLLM):
         )
         return result[0]["generated_text"][-1]["content"]
 
-
 class DeepseekApiLLM(BaseLLM):
 
     def __init__(
         self,
         api_key: str,
-        base_url: str = "https://api.deepseek.com",
-        model: str = "deepseek-chat",
+        base_url: str,
+        model: str = "gpt-4.1",
     ):
         from openai import OpenAI
 
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(
+            api_key=api_key.strip(),
+            base_url=base_url.rstrip("/"),
+        )
         self.model = model
 
     def generate(self, prompt: str, max_tokens: int = 1024) -> str:
@@ -77,9 +79,9 @@ class DeepseekApiLLM(BaseLLM):
             ],
             max_tokens=max_tokens,
             temperature=0.7,
+            stream=False,
         )
         return response.choices[0].message.content
-
 class StubLLM(BaseLLM):
 
     def generate(self, prompt: str, max_tokens: int = 1024) -> str:

@@ -3,3 +3,4 @@
 __pycache__/
 .venv/
 paraphrase-multilingual-mpnet-base-v2
+token.txt
